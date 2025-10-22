@@ -1,0 +1,77 @@
+# .github/workflows/promote-branch.yaml
+---
+name: Promote Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      promotion:
+        description: 'Select promotion path'
+        required: true
+        type: choice
+        options:
+          - dev -> staging
+          - staging -> main
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Parse promotion path
+        id: parse
+        run: |
+          PROMOTION="${{ inputs.promotion }}"
+          
+          if [[ "$PROMOTION" == "dev -> staging" ]]; then
+            echo "source=dev" >> $GITHUB_OUTPUT
+            echo "target=staging" >> $GITHUB_OUTPUT
+          elif [[ "$PROMOTION" == "staging -> main" ]]; then
+            echo "source=staging" >> $GITHUB_OUTPUT
+            echo "target=main" >> $GITHUB_OUTPUT
+          else
+            echo "Error: Invalid promotion path"
+            exit 1
+          fi
+          
+          echo "✓ Promotion: $PROMOTION"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Promote branches
+        run: |
+          SOURCE="${{ steps.parse.outputs.source }}"
+          TARGET="${{ steps.parse.outputs.target }}"
+          
+          # Fetch latest
+          git fetch origin "$SOURCE"
+          git fetch origin "$TARGET"
+          
+          # Checkout target and fast-forward merge source
+          git checkout "$TARGET"
+          
+          # Use --ff-only to ensure clean fast-forward (fails if not possible)
+          git merge "origin/$SOURCE" --ff-only
+          
+          # Push changes
+          git push origin "$TARGET"
+          
+          echo "✓ Successfully promoted $SOURCE to $TARGET (fast-forward)"
+
+      - name: Summary
+        run: |
+          echo "## Promotion Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Promotion:** ${{ inputs.promotion }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ✓ Success" >> $GITHUB_STEP_SUMMARY
