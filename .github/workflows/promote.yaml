@@ -2,7 +2,7 @@
 ---
 name: Promote Branch
 
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Promote {0}', inputs.promotion) || format('Merge PR #{0}', github.event.issue.number) }}
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('Promote {0}', inputs.promotion) || format('Merge PR #{0}', github.event.issue.number) }}"
 
 on:
   # Create PR workflow
