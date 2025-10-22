@@ -107,7 +107,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUMBER=${{ github.event.issue.number }}
-          PR_DATA=$(gh pr view "$PR_NUMBER" --json baseRefName,headRefName,state,reviewDecision)
+          PR_DATA=$(gh pr view "$PR_NUMBER" --repo ${{ github.repository }} --json baseRefName,headRefName,state,reviewDecision)
 
           BASE=$(echo "$PR_DATA" | jq -r '.baseRefName')
           HEAD=$(echo "$PR_DATA" | jq -r '.headRefName')
@@ -131,17 +131,17 @@ jobs:
           
           # Only allow promotions to staging or main
           if [[ "$BASE" != "staging" && "$BASE" != "main" ]]; then
-            gh pr comment ${{ github.event.issue.number }} --body "❌ Cannot promote: This workflow only supports promotions to \`staging\` or \`main\` branches"
+            gh pr comment ${{ github.event.issue.number }} --repo ${{ github.repository }} --body "❌ Cannot promote: This workflow only supports promotions to \`staging\` or \`main\` branches"
             exit 1
           fi
           
           if [[ "${{ steps.pr.outputs.state }}" != "OPEN" ]]; then
-            gh pr comment ${{ github.event.issue.number }} --body "❌ Cannot merge: PR is not open"
+            gh pr comment ${{ github.event.issue.number }} --repo ${{ github.repository }} --body "❌ Cannot merge: PR is not open"
             exit 1
           fi
           
           if [[ "${{ steps.pr.outputs.review }}" != "APPROVED" ]]; then
-            gh pr comment ${{ github.event.issue.number }} --body "❌ Cannot merge: PR requires approval"
+            gh pr comment ${{ github.event.issue.number }} --repo ${{ github.repository }} --body "❌ Cannot merge: PR requires approval"
             exit 1
           fi
 
@@ -174,7 +174,7 @@ jobs:
           git checkout "$TARGET"
           
           if ! git merge "origin/$SOURCE" --ff-only; then
-            gh pr comment "$PR_NUMBER" --body "❌ Fast-forward merge failed. Please rebase $SOURCE on $TARGET"
+            gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} --body "❌ Fast-forward merge failed. Please rebase $SOURCE on $TARGET"
             exit 1
           fi
 
@@ -182,7 +182,7 @@ jobs:
           git push origin "$TARGET"
 
           # Comment success
-          gh pr comment "$PR_NUMBER" --body "✅ Successfully merged $SOURCE → $TARGET via fast-forward"
+          gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} --body "✅ Successfully merged $SOURCE → $TARGET via fast-forward"
 
           echo "✓ Fast-forward merge completed"
 
