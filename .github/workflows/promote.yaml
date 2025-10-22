@@ -1,10 +1,11 @@
-# .github/workflows/promote-branch.yaml
+# .github/workflows/promote.yaml
 ---
 name: Promote Branch
 
-run-name: Promote ${{ inputs.promotion }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Promote {0}', inputs.promotion) || format('Merge PR {0}', github.event.issue.number) }}
 
 on:
+  # Create PR workflow
   workflow_dispatch:
     inputs:
       promotion:
@@ -15,11 +16,16 @@ on:
           - dev -> staging
           - staging -> main
 
+  # Merge on comment workflow
+  issue_comment:
+    types: [created]
+
 jobs:
-  promote:
+  create-pr:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
     
     steps:
@@ -34,15 +40,115 @@ jobs:
           elif [[ "$PROMOTION" == "staging -> main" ]]; then
             echo "source=staging" >> $GITHUB_OUTPUT
             echo "target=main" >> $GITHUB_OUTPUT
-          else
-            echo "Error: Invalid promotion path"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Create PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SOURCE="${{ steps.parse.outputs.source }}"
+          TARGET="${{ steps.parse.outputs.target }}"
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --base "$TARGET" --head "$SOURCE" --json number --jq '.[0].number')
+
+          if [[ -n "$EXISTING_PR" ]]; then
+            echo "PR #$EXISTING_PR already exists"
+            exit 0
+          fi
+
+          # Create new PR
+          PR_TITLE="Promote $SOURCE to $TARGET"
+          PR_BODY="Automated promotion from \`$SOURCE\` to \`$TARGET\`
+
+          **To merge:** After approval, comment \`/promote\` to trigger fast-forward merge
+
+          ---
+          _Created by GitHub Actions_"
+
+          gh pr create \
+            --base "$TARGET" \
+            --head "$SOURCE" \
+            --title "$PR_TITLE" \
+            --body "$PR_BODY"
+
+          echo "✓ PR created - awaiting review and approval"
+
+  fast-forward-merge:
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/promote'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Check if commenter has write access
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PERMISSION=$(gh api repos/${{ github.repository }}/collaborators/${{ github.event.comment.user.login }}/permission --jq '.permission')
+
+          if [[ "$PERMISSION" != "write" && "$PERMISSION" != "maintain" && "$PERMISSION" != "admin" ]]; then
+            echo "❌ User does not have write access or higher"
+            exit 1
+          fi
+
+          echo "✓ User has $PERMISSION access"
+
+      - name: Get PR details
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ github.event.issue.number }}
+          PR_DATA=$(gh pr view "$PR_NUMBER" --json baseRefName,headRefName,state,reviewDecision)
+
+          BASE=$(echo "$PR_DATA" | jq -r '.baseRefName')
+          HEAD=$(echo "$PR_DATA" | jq -r '.headRefName')
+          STATE=$(echo "$PR_DATA" | jq -r '.state')
+          REVIEW=$(echo "$PR_DATA" | jq -r '.reviewDecision')
+
+          echo "base=$BASE" >> $GITHUB_OUTPUT
+          echo "head=$HEAD" >> $GITHUB_OUTPUT
+          echo "state=$STATE" >> $GITHUB_OUTPUT
+          echo "review=$REVIEW" >> $GITHUB_OUTPUT
+
+          echo "PR: $HEAD → $BASE"
+          echo "State: $STATE"
+          echo "Review: $REVIEW"
+
+      - name: Validate PR state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BASE="${{ steps.pr.outputs.base }}"
+          
+          # Only allow promotions to staging or main
+          if [[ "$BASE" != "staging" && "$BASE" != "main" ]]; then
+            gh pr comment ${{ github.event.issue.number }} --body "❌ Cannot promote: This workflow only supports promotions to \`staging\` or \`main\` branches"
             exit 1
           fi
           
-          echo "✓ Promotion: $PROMOTION"
+          if [[ "${{ steps.pr.outputs.state }}" != "OPEN" ]]; then
+            gh pr comment ${{ github.event.issue.number }} --body "❌ Cannot merge: PR is not open"
+            exit 1
+          fi
+          
+          if [[ "${{ steps.pr.outputs.review }}" != "APPROVED" ]]; then
+            gh pr comment ${{ github.event.issue.number }} --body "❌ Cannot merge: PR requires approval"
+            exit 1
+          fi
+
+          echo "✓ PR is approved and ready to merge"
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -52,75 +158,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Create or find PR
-        id: pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          SOURCE="${{ steps.parse.outputs.source }}"
-          TARGET="${{ steps.parse.outputs.target }}"
-          
-          # Check if PR already exists
-          EXISTING_PR=$(gh pr list --base "$TARGET" --head "$SOURCE" --json number --jq '.[0].number')
-          
-          if [[ -n "$EXISTING_PR" ]]; then
-            echo "Found existing PR #$EXISTING_PR"
-            echo "pr_number=$EXISTING_PR" >> $GITHUB_OUTPUT
-          else
-            # Create new PR
-            PR_TITLE="Promote $SOURCE to $TARGET"
-            PR_BODY="Automated promotion from \`$SOURCE\` to \`$TARGET\`
-            
-            This PR will be automatically merged via fast-forward."
-            
-            gh pr create \
-              --base "$TARGET" \
-              --head "$SOURCE" \
-              --title "$PR_TITLE" \
-              --body "$PR_BODY"
-            
-            PR_NUMBER=$(gh pr list --base "$TARGET" --head "$SOURCE" --json number --jq '.[0].number')
-            echo "Created PR #$PR_NUMBER"
-            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Wait for PR checks
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          SOURCE="${{ steps.parse.outputs.source }}"
-          TARGET="${{ steps.parse.outputs.target }}"
-          PR_NUMBER="${{ steps.pr.outputs.pr_number }}"
-          
-          echo "Waiting for PR checks to complete..."
-          
-          # Wait for checks to complete (max 5 minutes)
-          SECONDS=0
-          MAX_WAIT=300
-          
-          while [ $SECONDS -lt $MAX_WAIT ]; do
-            STATUS=$(gh pr view "$PR_NUMBER" --json statusCheckRollup --jq '.statusCheckRollup | length')
-            
-            if [ "$STATUS" == "0" ]; then
-              echo "No status checks required, proceeding..."
-              break
-            fi
-            
-            PENDING=$(gh pr view "$PR_NUMBER" --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.status == "PENDING" or .status == "IN_PROGRESS")] | length')
-            
-            if [ "$PENDING" == "0" ]; then
-              echo "All checks completed"
-              break
-            fi
-            
-            echo "Waiting for $PENDING check(s) to complete..."
-            sleep 10
-          done
-
       - name: Fast-forward merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          SOURCE="${{ steps.parse.outputs.source }}"
-          TARGET="${{ steps.parse.outputs.target }}"
+          SOURCE="${{ steps.pr.outputs.head }}"
+          TARGET="${{ steps.pr.outputs.base }}"
+          PR_NUMBER="${{ github.event.issue.number }}"
           
           # Fetch latest
           git fetch origin "$SOURCE"
@@ -128,18 +172,17 @@ jobs:
           
           # Checkout target and fast-forward merge source
           git checkout "$TARGET"
-          git merge "origin/$SOURCE" --ff-only
           
-          # Push - this will automatically close the PR
-          git push origin "$TARGET"
-          
-          echo "✓ Successfully promoted $SOURCE to $TARGET (fast-forward)"
-          echo "✓ PR will be automatically closed by GitHub"
+          if ! git merge "origin/$SOURCE" --ff-only; then
+            gh pr comment "$PR_NUMBER" --body "❌ Fast-forward merge failed. Please rebase $SOURCE on $TARGET"
+            exit 1
+          fi
 
-      - name: Summary
-        run: |
-          echo "## Promotion Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Promotion:** ${{ inputs.promotion }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **PR:** #${{ steps.pr.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status:** ✓ Fast-forward merge completed" >> $GITHUB_STEP_SUMMARY
+          # Push
+          git push origin "$TARGET"
+
+          # Comment success
+          gh pr comment "$PR_NUMBER" --body "✅ Successfully merged $SOURCE → $TARGET via fast-forward"
+
+          echo "✓ Fast-forward merge completed"
+
