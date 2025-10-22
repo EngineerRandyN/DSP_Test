@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     
     steps:
       - name: Parse promotion path
@@ -51,7 +52,72 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Promote branches
+      - name: Create or find PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SOURCE="${{ steps.parse.outputs.source }}"
+          TARGET="${{ steps.parse.outputs.target }}"
+          
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --base "$TARGET" --head "$SOURCE" --json number --jq '.[0].number')
+          
+          if [[ -n "$EXISTING_PR" ]]; then
+            echo "Found existing PR #$EXISTING_PR"
+            echo "pr_number=$EXISTING_PR" >> $GITHUB_OUTPUT
+          else
+            # Create new PR
+            PR_TITLE="Promote $SOURCE to $TARGET"
+            PR_BODY="Automated promotion from \`$SOURCE\` to \`$TARGET\`
+            
+            This PR will be automatically merged via fast-forward."
+            
+            gh pr create \
+              --base "$TARGET" \
+              --head "$SOURCE" \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY"
+            
+            PR_NUMBER=$(gh pr list --base "$TARGET" --head "$SOURCE" --json number --jq '.[0].number')
+            echo "Created PR #$PR_NUMBER"
+            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Wait for PR checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SOURCE="${{ steps.parse.outputs.source }}"
+          TARGET="${{ steps.parse.outputs.target }}"
+          PR_NUMBER="${{ steps.pr.outputs.pr_number }}"
+          
+          echo "Waiting for PR checks to complete..."
+          
+          # Wait for checks to complete (max 5 minutes)
+          SECONDS=0
+          MAX_WAIT=300
+          
+          while [ $SECONDS -lt $MAX_WAIT ]; do
+            STATUS=$(gh pr view "$PR_NUMBER" --json statusCheckRollup --jq '.statusCheckRollup | length')
+            
+            if [ "$STATUS" == "0" ]; then
+              echo "No status checks required, proceeding..."
+              break
+            fi
+            
+            PENDING=$(gh pr view "$PR_NUMBER" --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.status == "PENDING" or .status == "IN_PROGRESS")] | length')
+            
+            if [ "$PENDING" == "0" ]; then
+              echo "All checks completed"
+              break
+            fi
+            
+            echo "Waiting for $PENDING check(s) to complete..."
+            sleep 10
+          done
+
+      - name: Fast-forward merge
         run: |
           SOURCE="${{ steps.parse.outputs.source }}"
           TARGET="${{ steps.parse.outputs.target }}"
@@ -62,18 +128,18 @@ jobs:
           
           # Checkout target and fast-forward merge source
           git checkout "$TARGET"
-          
-          # Use --ff-only to ensure clean fast-forward (fails if not possible)
           git merge "origin/$SOURCE" --ff-only
           
-          # Push changes
+          # Push - this will automatically close the PR
           git push origin "$TARGET"
           
           echo "✓ Successfully promoted $SOURCE to $TARGET (fast-forward)"
+          echo "✓ PR will be automatically closed by GitHub"
 
       - name: Summary
         run: |
           echo "## Promotion Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Promotion:** ${{ inputs.promotion }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status:** ✓ Success" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR:** #${{ steps.pr.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ✓ Fast-forward merge completed" >> $GITHUB_STEP_SUMMARY
