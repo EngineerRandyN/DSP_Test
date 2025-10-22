@@ -1,6 +1,6 @@
 # .github/workflows/promote-branch.yaml
 ---
-name: Promote Branch
+name: Promote Branch ${{ inputs.promotion }}
 
 on:
   workflow_dispatch:
